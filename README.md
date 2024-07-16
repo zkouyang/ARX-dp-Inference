@@ -1,2 +1,2 @@
-# Stage_Conditioned_Imitation_Learning
+# Stage Conditioned Imitation Learning
 SCIL: Stage Conditioned Imitation Learning
