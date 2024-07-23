@@ -1,0 +1,11 @@
+<launch>
+    <!-- 启动节点 -->
+    <node pkg="arm_control" type="mid_image_publish.py" name="mid_camera_publisher" output="screen">
+    </node>
+
+    <node pkg="arm_control" type="right_image_publish.py" name="right_camera_publisher" output="screen">
+    </node>
+
+    <node pkg="arm_control" type="image_display.py" name="image_display" output="screen">
+    </node>
+</launch>
