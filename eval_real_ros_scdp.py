@@ -62,6 +62,8 @@ import threading
 from cv_bridge import CvBridge
 import matplotlib.pyplot as plt
 
+from policy_obs import StageObsPolicy
+
 gripper_width_min = -0.016
 gripper_width_max = 0.4
 actual_gripper_width_min = 0.0
@@ -71,7 +73,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 np.set_printoptions(suppress=True)
 
 @click.command()
-@click.option("--input_path", "-ip", required=True, help="Path to checkpoint",)
+@click.option("--input_path", "-ip", required=True, help="Path to checkpoint folder",)
 @click.option("--output_path", "-op", required=True, default="/home/dc/Desktop/diffusion-policy-inference-master/data/", help="Output video path")
 @click.option("--frequency", "-f", default=10, type=int, help="control frequency")
 @click.option("--steps_per_inference", "-si", default=8, type=int, help="Action horizon for inference.")
@@ -85,7 +87,7 @@ def main(
     steps_per_inference,
     max_step
 ):
-    global obs_ring_buffer, current_step
+    global obs_ring_buffer, current_step, Hidden, stage_pred
 
 
     dt = 1 / frequency
@@ -93,10 +95,20 @@ def main(
     max_obs_buffer_size = 30
     num_stage = 2
 
+    # High-level policy: stage observer
+    obs_path = os.path.join(input_path, 'stage_observer/stage_obs_best.pth')
+    policy_obs = StageObsPolicy(num_classes=num_stage)
+    policy_obs.load_state_dict(torch.load(obs_path))
+    policy_obs.cuda()
+    policy_obs.eval()
+    Hidden = None
+    stage_pred = []
+
+    # Low-level policy: diffusion policy for each stage
     policies = {}
     for stage_idx in range(num_stage):
         # load checkpoint for each stage
-        ckpt_path = os.path.join(input_path, f'stage_{stage_idx}')
+        ckpt_path = os.path.join(input_path, f'stage_{stage_idx}/latest.ckpt')
         payload = torch.load(open(ckpt_path, "rb"), map_location="cpu", pickle_module=dill)
         cfg = payload["cfg"]
         print(cfg)
@@ -125,8 +137,7 @@ def main(
         print("steps_per_inference:", steps_per_inference)
 
         # policies['policy_0'], policies['policy_1'], ...
-        policies[f'policy_{stage_idx}'] = policy
-
+        policies[f'policy_{stage_idx}'] = policy 
     
     # shared memory
     shm_manager = SharedMemoryManager()
@@ -137,7 +148,7 @@ def main(
     examples["right"] = np.empty(shape=obs_res[::-1] + (3,), dtype=np.uint8)
     examples["eef_qpos"] = np.empty(shape=(7,), dtype=np.float64)
     examples["qpos"] = np.empty(shape=(7,), dtype=np.float64)
-    # examples["mid_orig"] = np.empty(shape=(480, 640, 3, ), dtype=np.uint8)
+    examples["mid_orig"] = np.empty(shape=(480, 640, 3, ), dtype=np.uint8)
     # examples["right_orig"] = np.empty(shape=(480, 640, 3, ), dtype=np.uint8)
     examples["timestamp"] = 0.0
     obs_ring_buffer = SharedMemoryRingBuffer.create_from_examples(
@@ -260,6 +271,15 @@ def main(
             # import ipdb;ipdb.set_trace()
             # exit()
             print(obs_dict['qpos'])
+
+            # get stage prediction
+            mid_image_obs = transform_obs(obs_data["mid_orig"])
+            output, Hidden = policy_obs(mid_image_obs, Hidden)
+            _, predicted = torch.max(output.data, 2)
+            stage = int(predicted.item())
+            stage_pred.append(stage)
+            
+            # get action prediction
             result = policies[f'stage_{stage}'].predict_action(obs_dict)
             
             action = result["action"][0].detach().to("cpu").numpy()
@@ -329,10 +349,15 @@ def main(
     output_video_right.release()
     cv2.destroyAllWindows()
 
+    # save stage prediction
+    stage_pred_file = os.path.join(new_dir, 'stage_pred.txt')
+    with open(stage_pred_file, 'w') as f:
+        for pred in stage_pred:
+            f.write(f"{pred}\n")
     
 
 def callback(eef_qpos, qpos, image_mid, image_right, output_video_visualization, output_video_mid, output_video_right, max_step, start_time):
-    global obs_ring_buffer, current_step
+    global obs_ring_buffer, current_step, Hidden, stage_pred
 
     mid = image_mid
     right = image_right
@@ -376,7 +401,7 @@ def callback(eef_qpos, qpos, image_mid, image_right, output_video_visualization,
     obs_data["mid"] = transform(mid)
     obs_data["right"] = transform(right)
     obs_data["timestamp"] = receive_time
-    # obs_data["mid_orig"] = mid
+    obs_data["mid_orig"] = mid
     # obs_data["right_orig"] = right
 
     # img_to_save = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -431,6 +456,30 @@ def transform(data, video_capture_resolution=(640, 480), obs_image_resolution=(2
     
     tf_data = color_tf(data)
     return tf_data
+
+def transform_obs(image, resize=(112, 112)):
+    """
+    transform_obs: Convert from image to the format required by StageObsPolicy input.
+    Includes resizing, normalization, and adding a batch dimension.
+    
+    Parameters:
+    image (np.array): Image obtained from the camera
+    resize (tuple): Size to which the image should be resized
+
+    Returns:
+    torch.Tensor: Preprocessed image tensor
+    """
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize(resize, antialias=True),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    image = transform(image)
+    image = image.unsqueeze(0)  # Add batch dimension
+    image = image.unsqueeze(1)
+    image = image.cuda().float()
+    return image
+
 
 if __name__ == "__main__":
     main()
