@@ -64,6 +64,8 @@ import matplotlib.pyplot as plt
 
 from policy_obs import StageObsPolicy
 
+NUM_STAGE = 2 # number of stages
+
 gripper_width_min = -0.016
 gripper_width_max = 0.4
 actual_gripper_width_min = 0.0
@@ -87,22 +89,23 @@ def main(
     steps_per_inference,
     max_step
 ):
-    global obs_ring_buffer, current_step, Hidden, stage_pred
+    global obs_ring_buffer, current_step, Hidden, stage_pred_list, obs_timestamps_list
 
 
     dt = 1 / frequency
     video_capture_fps = 30
     max_obs_buffer_size = 30
-    num_stage = 2
+    num_stage = NUM_STAGE
 
     # High-level policy: stage observer
-    obs_path = os.path.join(input_path, 'stage_observer/stage_obs_best.pth')
+    obs_path = os.path.join(input_path, 'stage_observer/model_best.pth')
     policy_obs = StageObsPolicy(num_classes=num_stage)
     policy_obs.load_state_dict(torch.load(obs_path))
     policy_obs.cuda()
     policy_obs.eval()
     Hidden = None
-    stage_pred = []
+    stage_pred_list = []
+    obs_timestamps_list = []
 
     # Low-level policy: diffusion policy for each stage
     policies = {}
@@ -254,6 +257,7 @@ def main(
             obs_dict[key] = last_data[key][this_idxs]
 
         obs_timestamps = obs_dict["timestamp"]
+        obs_timestamps_list.append(obs_timestamps)
         print("Got Observation!")
 
         # run inference
@@ -277,7 +281,7 @@ def main(
             output, Hidden = policy_obs(mid_image_obs, Hidden)
             _, predicted = torch.max(output.data, 2)
             stage = int(predicted.item())
-            stage_pred.append(stage)
+            stage_pred_list.append(stage)
             
             # get action prediction
             result = policies[f'stage_{stage}'].predict_action(obs_dict)
@@ -352,12 +356,12 @@ def main(
     # save stage prediction
     stage_pred_file = os.path.join(new_dir, 'stage_pred.txt')
     with open(stage_pred_file, 'w') as f:
-        for pred in stage_pred:
-            f.write(f"{pred}\n")
+        for timestamp, pred in zip(obs_timestamps_list, stage_pred_list):
+            f.write(f"{timestamp}\t{pred}\n")
     
 
 def callback(eef_qpos, qpos, image_mid, image_right, output_video_visualization, output_video_mid, output_video_right, max_step, start_time):
-    global obs_ring_buffer, current_step, Hidden, stage_pred
+    global obs_ring_buffer, current_step, Hidden, stage_pred_list, obs_timestamps_list
 
     mid = image_mid
     right = image_right
