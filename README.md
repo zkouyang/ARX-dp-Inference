@@ -17,9 +17,11 @@ python dp/eval_real_ros.py -ip="ckpt所在路径" -op="视频存放的文件夹"
 ```
 
 ## output_path(-op)中保存的文件
+```
 - episode_N
     - mid
         - mid.mp4
     - right
         - right.mp4
     - display.mp4
+```
